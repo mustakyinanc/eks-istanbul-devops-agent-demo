@@ -1,0 +1,8 @@
+# Copy this file to terraform.tfvars and fill in your values
+# cp terraform.tfvars.example terraform.tfvars
+
+region             = "eu-central-1"
+cluster_name       = "eks-istanbul"
+kubernetes_version = "1.29"
+instance_type      = "c7i.large"
+my_ip              = "YOUR_PUBLIC_IP/32"   # e.g. "1.2.3.4/32"

@@ -154,11 +154,10 @@ CloudWatch → Alarms → eks-istanbul-high-cpu → Status: OK
 
 ## Step 4 - Set Up AWS DevOps Agent (~5 minutes)
 
-> DevOps Agent is currently available in **us-east-1** only.
+
 
 **4.1 Open DevOps Agent:**
 ```
-AWS Console → Switch region to us-east-1
 → Search "DevOps Agent" → Open
 ```
 

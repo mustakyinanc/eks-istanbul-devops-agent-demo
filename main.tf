@@ -219,11 +219,6 @@ resource "aws_eks_addon" "kube_proxy" {
   addon_name   = "kube-proxy"
 }
 
-resource "aws_eks_addon" "ebs_csi" {
-  cluster_name = aws_eks_cluster.istanbul.name
-  addon_name   = "aws-ebs-csi-driver"
-}
-
 # Container Insights addon (depends on node groups being ready)
 resource "aws_eks_addon" "cloudwatch_observability" {
   cluster_name = aws_eks_cluster.istanbul.name

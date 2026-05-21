@@ -224,6 +224,37 @@ resource "aws_eks_addon" "ebs_csi" {
   addon_name   = "aws-ebs-csi-driver"
 }
 
+# Container Insights addon (depends on node groups being ready)
+resource "aws_eks_addon" "cloudwatch_observability" {
+  cluster_name = aws_eks_cluster.istanbul.name
+  addon_name   = "amazon-cloudwatch-observability"
+
+  depends_on = [
+    aws_eks_node_group.stress,
+    aws_eks_node_group.isolate,
+  ]
+}
+
+# --- CloudWatch Alarm ---
+
+resource "aws_cloudwatch_metric_alarm" "high_cpu" {
+  alarm_name          = "${var.cluster_name}-high-cpu"
+  namespace           = "ContainerInsights"
+  metric_name         = "node_cpu_utilization"
+  statistic           = "Average"
+  period              = 60
+  threshold           = 40
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 1
+  treat_missing_data  = "notBreaching"
+
+  dimensions = {
+    ClusterName = var.cluster_name
+  }
+
+  depends_on = [aws_eks_addon.cloudwatch_observability]
+}
+
 # --- Security Group Rules ---
 
 resource "aws_security_group_rule" "worker_http_ingress" {

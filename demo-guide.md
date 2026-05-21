@@ -71,7 +71,18 @@ aws sts get-caller-identity
 
 ---
 
-## Step 1 - Enable Istanbul Local Zone (~5 minutes)
+## Step 1 - Clone the Repository
+
+```bash
+git clone https://github.com/mustakyinanc/eks-istanbul-devops-agent-demo.git
+cd eks-istanbul-devops-agent-demo
+```
+
+All subsequent commands in this guide must be run from this directory.
+
+---
+
+## Step 2 - Enable Istanbul Local Zone (~5 minutes)
 
 > ⚠️ This step is required. Istanbul Local Zone is not enabled by default.
 
@@ -82,7 +93,7 @@ aws sts get-caller-identity
 
 ---
 
-## Step 2 - Deploy Infrastructure (~20 minutes)
+## Step 3 - Deploy Infrastructure (~20 minutes)
 
 **2.1 Find your public IP:**
 ```bash
@@ -133,7 +144,7 @@ Both nodes should be `Ready`. One has `role=stress`, the other `role=isolate`.
 
 ---
 
-## Step 3 - Set Up Observability (~5 minutes)
+## Step 4 - Set Up Observability (~5 minutes)
 
 ```bash
 cd ..
@@ -152,12 +163,13 @@ CloudWatch → Alarms → eks-istanbul-high-cpu → Status: OK
 
 ---
 
-## Step 4 - Set Up AWS DevOps Agent (~5 minutes)
+## Step 5 - Set Up AWS DevOps Agent (~5 minutes)
 
-
+> DevOps Agent is currently available in **us-east-1** only.
 
 **4.1 Open DevOps Agent:**
 ```
+AWS Console → Switch region to us-east-1
 → Search "DevOps Agent" → Open
 ```
 
@@ -183,7 +195,7 @@ CloudWatch → Alarms → eks-istanbul-high-cpu → Status: OK
 
 ---
 
-## Step 5 - Inject Disaster (~1 minute)
+## Step 6 - Inject Disaster (~1 minute)
 
 ```bash
 bash scripts/disaster.sh
@@ -204,7 +216,7 @@ kubectl get pods -o wide
 
 ---
 
-## Step 6 - Wait for CloudWatch Alarm (~2 minutes)
+## Step 7 - Wait for CloudWatch Alarm (~2 minutes)
 
 ```
 AWS Console → CloudWatch → Alarms → eks-istanbul-high-cpu
@@ -214,7 +226,7 @@ Wait until status changes: `OK` → `ALARM`
 
 ---
 
-## Step 7 - DevOps Agent Investigation
+## Step 8 - DevOps Agent Investigation
 
 Open AWS DevOps Agent → your Agent Space → **New Investigation**
 
@@ -229,7 +241,7 @@ Let the agent run (~7-10 minutes). Do not interrupt or provide additional prompt
 
 ---
 
-## Step 8 - Review Findings
+## Step 9 - Review Findings
 
 ### Expected findings:
 | Finding | Detected? |
@@ -260,7 +272,7 @@ mapRoles:
 
 ---
 
-## Step 9 - Cleanup
+## Step 10 - Cleanup
 
 **9.1 Restore cluster:**
 ```bash

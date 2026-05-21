@@ -27,12 +27,12 @@ echo ""
 
 # Step 2: Deploy CPU stress pods to stress node
 echo "[2/3] Deploying CPU stress pods to role=stress node..."
-for i in $(seq 1 6); do
+for i in $(seq 1 10); do
   kubectl run cpu-stress-$i \
     --image=hande007/stress-ng \
     --restart=Never \
     --overrides='{"spec": {"nodeSelector": {"role": "stress"}}}' \
-    -- --cpu 2 --vm 1 --vm-bytes 2g --timeout 600s --vm-keep \
+    -- --cpu 2 --timeout 600s \
     2>/dev/null && echo "  ✅ cpu-stress-$i deployed" || echo "  ⚠️  cpu-stress-$i already exists"
 done
 echo ""

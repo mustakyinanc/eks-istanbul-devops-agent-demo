@@ -110,7 +110,7 @@ Edit `terraform.tfvars`:
 ```hcl
 region             = "eu-central-1"
 cluster_name       = "eks-istanbul"
-kubernetes_version = "1.29"
+kubernetes_version = "1.33"
 instance_type      = "c7i.large"
 my_ip              = "YOUR_IP_HERE/32"   # e.g. "1.2.3.4/32"
 ```
@@ -136,8 +136,8 @@ kubectl get nodes --show-labels
 Expected output:
 ```
 NAME                                            STATUS   ROLES    AGE   VERSION
-ip-10-20-10-xxx.eu-central-1.compute.internal  Ready    <none>   5m    v1.29.x
-ip-10-20-10-yyy.eu-central-1.compute.internal  Ready    <none>   5m    v1.29.x
+ip-10-20-10-xxx.eu-central-1.compute.internal  Ready    <none>   5m    v1.33.x
+ip-10-20-10-yyy.eu-central-1.compute.internal  Ready    <none>   5m    v1.33.x
 ```
 
 Both nodes should be `Ready`. One has `role=stress`, the other `role=isolate`.

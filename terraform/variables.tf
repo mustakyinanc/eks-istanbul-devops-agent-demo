@@ -11,9 +11,14 @@ variable "cluster_name" {
 }
 
 variable "kubernetes_version" {
-  description = "Kubernetes version"
+  description = "Kubernetes version (EKS supports 1.31-1.36; 1.29 and older are end of standard support)"
   type        = string
-  default     = "1.29"
+  default     = "1.33"
+
+  validation {
+    condition     = can(regex("^[0-9]+\\.[0-9]+$", var.kubernetes_version))
+    error_message = "The kubernetes_version variable must use MAJOR.MINOR format, for example \"1.33\"."
+  }
 }
 
 variable "instance_type" {

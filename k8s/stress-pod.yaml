@@ -1,0 +1,29 @@
+---
+# CPU stress pod for the DevOps Agent incident demo.
+#
+# disaster.sh applies this manifest once per Stress_Pod, replacing the
+# STRESS_POD_NAME placeholder with a distinct name (cpu-stress-1 .. cpu-stress-6).
+# Everything else — image, load arguments, node selector, restart policy — is
+# governed here so a single definition controls the injected load.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: STRESS_POD_NAME
+  namespace: default
+  labels:
+    app: cpu-stress
+    demo: eks-istanbul-devops-agent
+spec:
+  # Pin to the stress node. If no role=stress node is schedulable the pod stays
+  # Pending rather than landing on the cordoned isolate node.
+  nodeSelector:
+    role: stress
+  restartPolicy: Never
+  containers:
+    - name: stress
+      image: hande007/stress-ng
+      args:
+        - --cpu
+        - "2"
+        - --timeout
+        - 600s

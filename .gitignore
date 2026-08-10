@@ -1,14 +1,27 @@
-# Terraform
+# Terraform state (contains account IDs, cluster CA data, resource ARNs)
 .terraform/
-.terraform.lock.hcl
-terraform.tfstate
-terraform.tfstate.backup
-*.tfstate*
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+
+# Terraform plan files (binary, contains resolved variable values)
+*.tfplan
+tfplan
+plan.out
+
+# Terraform variable files (contain operator IP, account-specific values)
 *.tfvars
+*.tfvars.json
+!*.tfvars.example
+
+# Terraform CLI output logs (contain account IDs, public IPs, CA certs)
+*.log
+crash.log
+crash.*.log
 
 # AWS credentials
 .aws/
-credentials
+.aws/credentials
 
 # OS
 .DS_Store

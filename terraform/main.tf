@@ -250,6 +250,56 @@ resource "aws_cloudwatch_metric_alarm" "high_cpu" {
   depends_on = [aws_eks_addon.cloudwatch_observability]
 }
 
+# Node memory exhaustion (disaster-oom.sh scenario).
+# Threshold sits between the observed idle baseline (~35-40%) and the
+# incident level (~86%), so it separates the two without flapping.
+resource "aws_cloudwatch_metric_alarm" "high_memory" {
+  alarm_name          = "${var.cluster_name}-high-memory"
+  alarm_description   = "Node memory utilization above ${var.memory_threshold}% - possible memory exhaustion or leak"
+  namespace           = "ContainerInsights"
+  metric_name = "node_memory_utilization"
+  # Maximum, not Average: the ClusterName dimension aggregates across every
+  # node, so a single exhausted node is diluted by the healthy ones. With two
+  # nodes the cluster Average peaks near 50% while the affected node is at
+  # ~61%, which would never cross the threshold. Maximum tracks the worst node.
+  statistic           = "Maximum"
+  period              = 60
+  threshold           = var.memory_threshold
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 2
+  datapoints_to_alarm = 2
+  treat_missing_data  = "notBreaching"
+
+  dimensions = {
+    ClusterName = var.cluster_name
+  }
+
+  depends_on = [aws_eks_addon.cloudwatch_observability]
+}
+
+# Container restart loop (OOMKilled -> CrashLoopBackOff).
+# Catches the restart signature even when node memory stays below the alarm
+# threshold, which happens when the kernel reclaims memory faster than the
+# kubelet housekeeping loop samples it.
+resource "aws_cloudwatch_metric_alarm" "container_restarts" {
+  alarm_name          = "${var.cluster_name}-container-restarts"
+  alarm_description   = "Containers restarting repeatedly - possible OOMKill or CrashLoopBackOff"
+  namespace           = "ContainerInsights"
+  metric_name         = "pod_number_of_container_restarts"
+  statistic           = "Maximum"
+  period              = 60
+  threshold           = var.restart_threshold
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 1
+  treat_missing_data  = "notBreaching"
+
+  dimensions = {
+    ClusterName = var.cluster_name
+  }
+
+  depends_on = [aws_eks_addon.cloudwatch_observability]
+}
+
 # --- Security Group Rules ---
 
 resource "aws_security_group_rule" "worker_http_ingress" {

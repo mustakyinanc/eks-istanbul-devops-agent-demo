@@ -1,0 +1,58 @@
+---
+# Node-level memory exhaustion pod for the DevOps Agent incident demo.
+#
+# disaster-oom.sh applies this manifest once per pod, replacing the
+# MEMORY_HOG_NAME placeholder with a distinct name (mem-hog-1 .. mem-hog-N).
+#
+# Design notes — why this produces NODE-level OOM rather than container-level:
+#
+#   1. NO memory limit is set. Without a cgroup ceiling the container is never
+#      killed for exceeding its own limit; it keeps allocating until the NODE
+#      runs out of memory and the kernel OOM killer intervenes.
+#
+#   2. A deliberately tiny memory request (64Mi) against much larger real usage
+#      makes these pods Burstable with a poor oom_score. The kernel scores
+#      victims by how far they exceed their request, so these pods are killed
+#      well before kubelet system pods, coredns, or the CloudWatch agent.
+#
+#   3. Allocation is fast (stress-ng grabs memory immediately) so the node
+#      crosses the 100Mi evictionHard threshold faster than the kubelet
+#      housekeeping loop can gracefully evict, which is what pushes the failure
+#      into true kernel OOMKilled territory rather than a clean eviction.
+#
+#   4. restartPolicy: Always so the OOMKill turns into a visible restart loop
+#      (CrashLoopBackOff) with a climbing RESTARTS count, rather than a single
+#      terminal failure.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: MEMORY_HOG_NAME
+  namespace: default
+  labels:
+    app: mem-hog
+    demo: eks-istanbul-devops-agent
+spec:
+  # Confine the blast radius to the stress node. The isolate node stays healthy
+  # as a control, so the agent can compare a failing node against a good one.
+  nodeSelector:
+    role: stress
+  restartPolicy: Always
+  terminationGracePeriodSeconds: 1
+  containers:
+    - name: memory-hog
+      image: hande007/stress-ng
+      args:
+        - --vm
+        - "1"
+        - --vm-bytes
+        - MEMORY_HOG_BYTES
+        - --vm-keep
+        - --timeout
+        - 900s
+      resources:
+        requests:
+          # Intentionally far below real usage: keeps the pod schedulable while
+          # making it the kernel's preferred OOM victim.
+          memory: 64Mi
+          cpu: 50m
+        # NOTE: no limits block on purpose. See design note 1 above.

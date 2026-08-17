@@ -31,3 +31,25 @@ variable "my_ip" {
   description = "Your public IP address for NodePort and HTTP access (e.g. 1.2.3.4/32)"
   type        = string
 }
+
+variable "memory_threshold" {
+  description = "Node memory utilization percent that triggers the high memory alarm, evaluated as the Maximum across nodes (idle baseline is ~39%, the memory exhaustion scenario drives the affected node to ~61%)"
+  type        = number
+  default     = 55
+
+  validation {
+    condition     = var.memory_threshold > 0 && var.memory_threshold <= 100
+    error_message = "The memory_threshold variable must be greater than 0 and at most 100."
+  }
+}
+
+variable "restart_threshold" {
+  description = "Container restart count that triggers the restart loop alarm"
+  type        = number
+  default     = 0
+
+  validation {
+    condition     = var.restart_threshold >= 0
+    error_message = "The restart_threshold variable must be 0 or greater."
+  }
+}

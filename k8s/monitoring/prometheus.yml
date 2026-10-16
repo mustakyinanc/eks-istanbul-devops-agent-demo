@@ -1,0 +1,183 @@
+# ============================================================================
+# Prometheus configuration TEMPLATE for Monitoring_Instance
+#
+# This file is a TEMPLATE, not a ready-to-run config. Two values are
+# account-specific and are supplied by the operator at provisioning time:
+#
+#     __GRAFANA_CLOUD_REMOTE_WRITE_URL__   Grafana Cloud remote_write endpoint
+#     __GRAFANA_CLOUD_USERNAME__           Grafana Cloud stack user id
+#
+# SUBSTITUTION MECHANISM (contract with scripts/provision-monitoring-instance.sh):
+#   Placeholders are `__UPPERCASE_TOKEN__` and are replaced by `sed` in
+#   provision-monitoring-instance.sh before the file is copied to
+#   /etc/prometheus/prometheus.yml on Monitoring_Instance. Prometheus does NOT
+#   expand environment variables inside its own config file, which is why
+#   sed-based token substitution is used instead of `${VAR}` / envsubst style.
+#   Any new account-specific value MUST follow the same `__TOKEN__` convention.
+#
+# SECRETS: the remote_write password NEVER appears in this file and MUST NEVER
+#   be added to it. Prometheus reads it at runtime from
+#   /etc/prometheus/remote_write_password, which the provisioning script writes
+#   separately with mode 0600 over SSH. user_data is deliberately not used for
+#   the password because instance metadata is readable from the instance.
+#
+# LOCAL RETENTION is NOT configured here. Prometheus only accepts local TSDB
+#   retention as a command-line flag, so `--storage.tsdb.retention.time` lives
+#   in the systemd unit written by provision-monitoring-instance.sh (>= 24h).
+#   Do not look for a retention setting in this YAML.
+#
+# WEB LISTEN ADDRESS is likewise a command-line flag
+#   (`--web.listen-address=127.0.0.1:9090`); the UI is reachable only through an
+#   SSH tunnel and no inbound port is opened to the internet.
+#
+# Requirements: 2.4, 2.5, 2.6, 2.7, 4.1, 4.2, 4.4, 4.8
+# ============================================================================
+
+global:
+  # 30s scrape interval with a 10s timeout. The timeout is intentionally well
+  # below the interval: scraping crosses from the Monitoring_Subnet
+  # (eu-central-1c) into the Istanbul Local Zone subnet. Measured: ~42 ms RTT,
+  # scrape durations 0.05-0.27 s. If targets start timing out, raise
+  # scrape_timeout first.
+  scrape_interval: 30s
+  scrape_timeout: 10s
+  external_labels:
+    cluster: eks-istanbul
+
+scrape_configs:
+  # --------------------------------------------------------------------------
+  # Target discovery: ec2_sd_configs
+  #
+  # Why EC2 service discovery rather than kubernetes_sd_configs or static_configs:
+  #   * No Kubernetes authentication. Prometheus runs OUTSIDE the cluster, so
+  #     kubernetes_sd_configs would require carrying and rotating a ServiceAccount
+  #     token (or aws-iam-authenticator) on this host. ec2_sd_configs needs only
+  #     the instance's own IAM role, which grants exactly ec2:DescribeInstances.
+  #   * Survives node IP churn. Worker node private IPs change on every
+  #     scale-down/scale-up and whenever a node group is replaced. No node name,
+  #     private IP, instance id or ASG name is hardcoded anywhere in this file.
+  #
+  # The filter `tag:eks:cluster-name = eks-istanbul` selects exactly the EKS
+  # worker nodes. Monitoring_Instance deliberately does NOT carry that tag, so
+  # Prometheus never discovers itself as a scrape target.
+  #
+  # Two jobs share the same discovery mechanism and differ only in target port.
+  # --------------------------------------------------------------------------
+
+  # Job 1 — node-exporter: per-node CPU / memory / load, published by the
+  # DaemonSet on hostPort 9100 on BOTH worker nodes (including Stress_Node).
+  - job_name: node-exporter
+    ec2_sd_configs:
+      - region: eu-central-1
+        port: 9100
+        filters:
+          - name: tag:eks:cluster-name
+            values: [eks-istanbul]
+          - name: instance-state-name
+            values: [running]
+    relabel_configs:
+      # Node identity comes from EC2 metadata, never from this file.
+      - source_labels: [__meta_ec2_private_ip]
+        target_label: instance
+      # `role` (stress / isolate) is a Kubernetes node LABEL, not an EC2 tag, so
+      # it is invisible to ec2_sd_configs. The EKS-managed EC2 tag
+      # eks:nodegroup-name (ng-istanbul-stress / ng-istanbul-isolate) carries
+      # the same information, so node_role is derived from it.
+      - source_labels: [__meta_ec2_tag_eks_nodegroup_name]
+        regex: ng-istanbul-(.+)
+        target_label: node_role
+        replacement: $1
+
+  # Job 2 — kube-state-metrics: Kubernetes object state (container restarts,
+  # pod phase, node schedulability). Single replica on role=isolate, published
+  # as a NodePort Service on 30808. Discovery returns both nodes, and because
+  # the Service uses externalTrafficPolicy: Cluster the NodePort answers on
+  # EITHER node (kube-proxy forwards). Scraping both would ingest every KSM
+  # series twice under different `instance` labels, double-counting
+  # container restarts and wasting series budget. The `keep` rule below therefore
+  # restricts this job to the isolate node group (where the role=isolate pod is
+  # scheduled), giving exactly one KSM target. It runs on the discovery
+  # metadata, so it is independent of the instance/node_role relabels after it.
+  - job_name: kube-state-metrics
+    ec2_sd_configs:
+      - region: eu-central-1
+        port: 30808
+        filters:
+          - name: tag:eks:cluster-name
+            values: [eks-istanbul]
+          - name: instance-state-name
+            values: [running]
+    relabel_configs:
+      # Scrape KSM through one node only, so each series arrives once.
+      # Keeps only the isolate node (node_role=isolate). `role=isolate` is a
+      # Kubernetes node LABEL, not an EC2 tag, so the EKS-managed EC2 tag
+      # eks:nodegroup-name (terraform aws_eks_node_group.isolate) is used.
+      - source_labels: [__meta_ec2_tag_eks_nodegroup_name]
+        regex: ng-istanbul-isolate
+        action: keep
+      - source_labels: [__meta_ec2_private_ip]
+        target_label: instance
+      - source_labels: [__meta_ec2_tag_eks_nodegroup_name]
+        regex: ng-istanbul-(.+)
+        target_label: node_role
+        replacement: $1
+
+remote_write:
+  - url: __GRAFANA_CLOUD_REMOTE_WRITE_URL__
+    basic_auth:
+      username: __GRAFANA_CLOUD_USERNAME__
+      # Password is read from this file at runtime, mode 0600, written by
+      # scripts/provision-monitoring-instance.sh. Never inline the password.
+      password_file: /etc/prometheus/remote_write_password
+
+    # Queue settings back the durability requirements: if Grafana Cloud is
+    # briefly unreachable, samples are buffered and retried with increasing
+    # backoff while writes to the local TSDB continue uninterrupted. If the
+    # queue fills, the oldest samples are dropped, the drop count is exposed as
+    # a Prometheus metric, and scraping continues.
+    queue_config:
+      capacity: 10000
+      max_shards: 5
+      min_backoff: 30ms
+      max_backoff: 5s
+
+    # ======================================================================
+    # Metric_Allowlist
+    #
+    # Placement is deliberate: the allowlist lives in write_relabel_configs,
+    # NOT in metric_relabel_configs. metric_relabel_configs would drop metrics
+    # before they reach the local TSDB. Here, the local TSDB keeps EVERYTHING
+    # for detailed local investigation over an SSH tunnel, and only the
+    # outbound stream to Grafana Cloud is narrowed. Free-tier series limits
+    # are respected without losing local diagnostic depth.
+    #
+    # SERIES BUDGET: 6,000 active series, against a free-tier cap of 10,000.
+    # The eight families below are estimated at ~170 series for two worker
+    # nodes, which leaves a wide margin.
+    #
+    # High-cardinality cAdvisor container metrics (container_memory_*,
+    # container_cpu_*, container_network_*, container_fs_*) are EXCLUDED. They
+    # alone can exceed 5,000 series and no dashboard panel uses them.
+    #
+    # This regex is the single editable place for the allowlist. To narrow the
+    # outbound stream, remove a name from this alternation; to widen it, add
+    # one. Prometheus anchors relabel regexes fully, so each alternative must
+    # match a whole metric name — `up` therefore matches only `up` and does not
+    # match, for example, `node_boot_time_seconds`.
+    #
+    # Allowed families and what each one is for:
+    #   node_cpu_seconds_total                    CPU panel
+    #   node_memory_MemAvailable_bytes            Memory panel
+    #   node_memory_MemTotal_bytes                Memory panel
+    #   kube_pod_container_status_restarts_total  Container restarts panel
+    #   kube_node_spec_unschedulable              node isolation (SchedulingDisabled)
+    #   kube_pod_status_phase                     investigation context
+    #   up                                        target health; the up=0 record
+    #                                             is the distinguishing signal of
+    #                                             out-of-cluster scraping
+    #   node_load1                                investigation context
+    # ======================================================================
+    write_relabel_configs:
+      - source_labels: [__name__]
+        action: keep
+        regex: node_cpu_seconds_total|node_memory_MemAvailable_bytes|node_memory_MemTotal_bytes|kube_pod_container_status_restarts_total|kube_node_spec_unschedulable|kube_pod_status_phase|up|node_load1

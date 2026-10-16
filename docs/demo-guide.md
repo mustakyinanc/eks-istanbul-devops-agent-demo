@@ -2,347 +2,329 @@
 
 ## Overview
 
-This demo showcases AWS DevOps Agent's ability to investigate a real Kubernetes incident
-involving two simultaneous failures in an EKS cluster running on Istanbul Local Zone.
+This demo shows AWS DevOps Agent investigating a real Kubernetes incident in an EKS cluster whose worker nodes run in the Istanbul Local Zone. The incident is investigated by a single **AWS DevOps Agent Space in us-east-1** that has two telemetry sources attached:
 
-**What you will build:**
+- **EKS + CloudWatch (eu-central-1)**: the `eks-istanbul` cluster, Container Insights and alarms.
+- **Grafana Cloud**: attached through the Grafana capability provider (Viewer service account token), fed by an out-of-cluster Prometheus on the Monitoring_Instance.
+
+The EKS cluster and all infrastructure stay in eu-central-1; only the Agent Space is in us-east-1.
+
 ```
-kubectl (local)
-      │
-      ▼
-EKS Control Plane (Frankfurt - eu-central-1)
-      │
-      ▼
-Worker Nodes (Istanbul Local Zone - eu-central-1-ist-1a)
-  ├── Node: role=stress   → CPU stress target
-  └── Node: role=isolate  → Isolation target
+kubectl (local) ──> EKS control plane (eu-central-1)
+                         │
+                         ▼
+        Worker nodes (Istanbul Local Zone, eu-central-1-ist-1a)
+          ├── role=stress   → CPU / memory stress target
+          └── role=isolate  → isolation target, runs kube-state-metrics
+
+  Monitoring_Instance (EC2, eu-central-1c, outside the cluster)
+    Prometheus scrapes :9100 and :30808 → remote_write → Grafana Cloud
 ```
 
-**Total setup time:** ~40 minutes  
-**Demo runtime:** ~15 minutes
+**Total setup time:** ~50 minutes
+**Demo runtime:** ~15-20 minutes per scenario
 
 ---
 
 ## Prerequisites
 
-### Required Tools
+### Tools
 
-**1. AWS CLI**
 ```bash
 # macOS
-brew install awscli
+brew install awscli kubectl
+brew tap hashicorp/tap && brew install hashicorp/tap/terraform
 
-# Verify
 aws --version
-```
-
-**2. Terraform**
-```bash
-# macOS
-brew tap hashicorp/tap
-brew install hashicorp/tap/terraform
-
-# Verify
 terraform --version
-```
-
-**3. kubectl**
-```bash
-# macOS
-brew install kubectl
-
-# Verify
 kubectl version --client
 ```
 
-### AWS Account Requirements
+Helm is not required.
 
-- An AWS account with administrator access
-- AWS CLI configured:
+### AWS account
+
+- Administrator access, AWS CLI configured (`aws configure`, region `eu-central-1`).
+- Verify with `aws sts get-caller-identity`.
+- An **existing EC2 key pair** in eu-central-1. Terraform does not create it:
+
 ```bash
-aws configure
-# Enter: AWS Access Key ID, Secret Access Key, Region: eu-central-1
+aws ec2 create-key-pair --region eu-central-1 --key-name eks-istanbul-monitoring \
+  --query KeyMaterial --output text > ~/.ssh/eks-istanbul-monitoring.pem
+chmod 600 ~/.ssh/eks-istanbul-monitoring.pem
 ```
 
-Verify:
-```bash
-aws sts get-caller-identity
-```
+### Grafana Cloud
+
+- A free-tier Grafana Cloud stack.
+- From the stack's Prometheus details page: the remote_write URL, the user id, and an access policy token with `metrics:write`.
 
 ---
 
 ## Step 1 - Clone the Repository
 
 ```bash
-git clone https://github.com/mustakyinanc/eks-istanbul-devops-agent-demo.git
+git clone https://github.com/<your-account>/eks-istanbul-devops-agent-demo.git
 cd eks-istanbul-devops-agent-demo
 ```
 
-All subsequent commands in this guide must be run from this directory.
+Run all commands from the repository root unless stated otherwise.
 
 ---
 
-## Step 2 - Enable Istanbul Local Zone (~5 minutes)
+## Step 2 - Enable the Istanbul Local Zone (~5 minutes)
 
-> ⚠️ This step is required. Istanbul Local Zone is not enabled by default.
-
-1. Go to AWS Console → **EC2** → **Settings** (left sidebar) → **Zones**
+1. AWS Console → **EC2** → **Settings** → **Zones**
 2. Find `eu-central-1-ist-1a` (Turkey - Istanbul)
-3. Click **Manage** → **Enable Zone Group**
-4. Wait for status to show **Enabled**
+3. **Manage** → **Enable Zone Group**
+4. Wait for **Enabled**
 
 ---
 
 ## Step 3 - Deploy Infrastructure (~20 minutes)
 
-**2.1 Find your public IP:**
 ```bash
-curl ifconfig.me
-```
+curl ifconfig.me    # your public IP
 
-**2.2 Configure Terraform variables:**
-```bash
 cd terraform
 cp terraform.tfvars.example terraform.tfvars
 ```
 
 Edit `terraform.tfvars`:
+
 ```hcl
-region             = "eu-central-1"
-cluster_name       = "eks-istanbul"
-kubernetes_version = "1.33"
-instance_type      = "c7i.large"
-my_ip              = "YOUR_IP_HERE/32"   # e.g. "1.2.3.4/32"
+my_ip        = "x.x.x.x/32"
+ssh_key_name = "eks-istanbul-monitoring"
 ```
 
-**2.3 Deploy:**
 ```bash
 terraform init
 terraform apply
-# Type "yes" when prompted
-# This takes ~20 minutes
+cd ..
 ```
 
-**2.4 Configure kubectl:**
-```bash
-aws eks update-kubeconfig --region eu-central-1 --name eks-istanbul
-```
-
-**2.5 Verify nodes:**
-```bash
-kubectl get nodes --show-labels
-```
-
-Expected output:
-```
-NAME                                            STATUS   ROLES    AGE   VERSION
-ip-10-20-10-xxx.eu-central-1.compute.internal  Ready    <none>   5m    v1.33.x
-ip-10-20-10-yyy.eu-central-1.compute.internal  Ready    <none>   5m    v1.33.x
-```
-
-Both nodes should be `Ready`. One has `role=stress`, the other `role=isolate`.
+This creates the VPC, EKS cluster, both node groups, add-ons (including Container Insights), the three CloudWatch alarms, and the Monitoring_Instance with its security group and IAM role.
 
 ---
 
-## Step 4 - Set Up Observability (~5 minutes)
+## Step 4 - Configure kubectl
 
 ```bash
-cd ..
+aws eks update-kubeconfig --region eu-central-1 --name eks-istanbul
+kubectl get nodes -L role
+```
+
+Both nodes should be `Ready`, one with `role=stress` and one with `role=isolate`.
+
+---
+
+## Step 5 - CloudWatch Path (~5 minutes)
+
+```bash
 bash scripts/setup-alarm.sh
 ```
 
-This script:
-1. Installs Container Insights addon
-2. Waits for metrics to flow to CloudWatch
-3. Creates the `eks-istanbul-high-cpu` alarm (threshold: 40%)
-
-**Verify in AWS Console:**
-```
-CloudWatch → Alarms → eks-istanbul-high-cpu → Status: OK
-```
+Verify: CloudWatch → Alarms → `eks-istanbul-high-cpu`, `eks-istanbul-high-memory`, `eks-istanbul-container-restarts` are `OK`.
 
 ---
 
-## Step 5 - Set Up AWS DevOps Agent (~5 minutes)
+## Step 6 - Prometheus / Grafana Path (~10 minutes)
 
-> DevOps Agent is currently available in **us-east-1** only.
+**6.1 In-cluster exporters:**
 
-**4.1 Open DevOps Agent:**
-```
-AWS Console → Switch region to us-east-1
-→ Search "DevOps Agent" → Open
+```bash
+bash scripts/setup-monitoring.sh
 ```
 
-**4.2 Create Agent Space:**
-1. Click **Create Agent Space**
-2. Name: `eks-istanbul-agent`
-3. Click **Create**
+Expect 1 kube-state-metrics pod and 2 node-exporter pods `Ready`.
 
-**4.3 Add EKS cluster as data source:**
-1. Go to your Agent Space → **Capabilities** tab
-2. Click **Cloud** → **Primary Source** → **Edit**
-3. Select your AWS account and region: `eu-central-1`
-4. Select cluster: `eks-istanbul`
-5. Click **Save**
+**6.2 Prometheus on the Monitoring_Instance:**
 
-**4.4 Add CloudWatch as data source:**
-1. Still in **Capabilities** tab → **Observability** → **Edit**
-2. Add CloudWatch → Region: `eu-central-1`
-3. Click **Save**
+```bash
+export GRAFANA_CLOUD_REMOTE_WRITE_URL='https://prometheus-prod-XX-prod-XX.grafana.net/api/prom/push'
+export GRAFANA_CLOUD_USERNAME='<stack user id>'
+export GRAFANA_CLOUD_PASSWORD='<access policy token>'
+bash scripts/provision-monitoring-instance.sh
+```
 
-**4.5 Verify connectivity:**
-- Both data sources should show green/connected status
+Expected summary: `node-exporter: 2 up`, `kube-state-metrics: 1 up` (3 targets, all `up=1`). The script is idempotent and masks all credential values in its output.
+
+Optional, to inspect Prometheus locally:
+
+```bash
+ssh -i ~/.ssh/eks-istanbul-monitoring.pem -L 9090:127.0.0.1:9090 ec2-user@$(terraform -chdir=terraform output -raw monitoring_public_ip)
+# open http://127.0.0.1:9090/targets
+```
+
+**6.3 Import the dashboard:** Grafana Cloud → Dashboards → New → Import → upload `k8s/monitoring/grafana-dashboard.json` → select the Grafana Cloud Prometheus data source. Panels: Node CPU usage, Node memory usage, Container restarts.
 
 ---
 
-## Step 6 - Inject Disaster (~1 minute)
+## Step 7 - Set Up AWS DevOps Agent (~10 minutes, manual)
+
+The demo uses one DevOps Agent Space in us-east-1 (see the AWS DevOps Agent documentation for currently supported regions). The monitored resources are in eu-central-1.
+
+**7.1 Create the DevOps Agent Space and attach EKS + CloudWatch (source 1)**
+
+1. AWS Console → DevOps Agent (region `us-east-1`) → **Create Agent Space**, e.g. `eks-istanbul`.
+2. **Capabilities** → **Cloud** → primary source: your account, region `eu-central-1`, cluster `eks-istanbul`.
+3. **Observability** → add CloudWatch, region `eu-central-1`.
+
+**7.2 Attach Grafana Cloud to the same Agent Space (source 2)**
+
+1. In Grafana Cloud: Administration → Service accounts → create one with the **Viewer** role → generate a token (`glsa_...`). Store it only in your password manager.
+2. In DevOps Agent: add a **Grafana capability provider** with your Grafana URL (`https://<stack>.grafana.net`) and the token.
+3. Attach the Grafana capability provider to the existing DevOps Agent Space from 7.1. Do not create a second Agent Space.
+
+Both sources of the Agent Space should show a connected status.
+
+---
+
+## Step 8 - Inject a Disaster
+
+### Scenario A - CPU saturation + node isolation
 
 ```bash
 bash scripts/disaster.sh
+kubectl get nodes          # isolate node: Ready,SchedulingDisabled
+kubectl get pods -o wide   # all cpu-stress pods on the stress node
 ```
 
-What happens:
-- `role=isolate` node → `SchedulingDisabled` (no new pods can be scheduled)
-- 6x stress pods → all land on `role=stress` node → CPU spikes
+Panels to watch in Grafana:
 
-Verify:
+- **Node CPU usage**: the `stress` series climbs above 40%.
+- **Explore**: `kube_node_spec_unschedulable == 1` for the isolate node.
+
+CloudWatch: `eks-istanbul-high-cpu` goes `OK` → `ALARM` in ~2-3 minutes.
+
+### Scenario B - Node-level memory exhaustion
+
 ```bash
-kubectl get nodes
-# role=isolate node should show: Ready,SchedulingDisabled
-
-kubectl get pods -o wide
-# All cpu-stress pods should be on the same node
+bash scripts/disaster-oom.sh
+kubectl get pods -o wide   # OOMKilled / CrashLoopBackOff, RESTARTS climbing
 ```
+
+Panels to watch in Grafana:
+
+- **Node memory usage**: the `stress` series rises (~61%).
+- **Container restarts**: the memory-hog pods climb steadily.
+- **Explore**: `up{job="node-exporter", node_role="stress"}` may drop to `0` while the node is starved. This gap is recorded by the out-of-cluster Prometheus.
+
+CloudWatch: `eks-istanbul-high-memory` and `eks-istanbul-container-restarts` go to `ALARM`.
 
 ---
 
-## Step 7 - Wait for CloudWatch Alarm (~2 minutes)
+## Step 9 - Run the Investigation
 
-```
-AWS Console → CloudWatch → Alarms → eks-istanbul-high-cpu
-```
-
-Wait until status changes: `OK` → `ALARM`
-
----
-
-## Step 8 - DevOps Agent Investigation
-
-Open AWS DevOps Agent → your Agent Space → **New Investigation**
-
-Enter **exactly** this prompt (no hints):
+Start one new investigation manually in the DevOps Agent Space per scenario with exactly this prompt, no hints:
 
 ```
 We have an active incident in our EKS cluster "eks-istanbul".
 Please investigate and report your findings.
 ```
 
-Let the agent run (~7-10 minutes). Do not interrupt or provide additional prompts.
+Let the run complete (~7-10 minutes). Do not add follow-up prompts.
 
 ---
 
-## Step 9 - Review Findings
+## Step 10 - Attribute Findings to Sources
 
-### Expected findings:
-| Finding | Detected? |
-|---|---|
-| High CPU on stress node | ✅ |
-| ENI churn from VPC CNI | ✅ |
-| CloudWatch alarm threshold history | ✅ |
-| Cluster remained at 2 nodes | ✅ |
-| Node isolation (SchedulingDisabled) | ❌ kubectl access needed |
+After each scenario, record for every signal which source the finding came from. Values: `detected`, `not detected`, `could not be investigated`.
 
-### Why node isolation is not detected:
-DevOps Agent uses CloudWatch and EC2 APIs by default. To detect `SchedulingDisabled` status, it needs kubectl access. This is a known gap and a good talking point in the demo.
+| Signal | Found via CloudWatch/EKS | Found via Grafana Cloud |
+|---|---|---|
+| High CPU on stress node (A) | | |
+| Node isolation / SchedulingDisabled (A) | | |
+| Node memory exhaustion (B) | | |
+| Container restart loop / OOMKilled (B) | | |
+| Target down (`up=0`) on stress node (B) | | |
+| Correct root cause identified | | |
+| Time to first finding | | |
+| Total investigation time | | |
 
-### How to enable kubectl access for next demo:
-Add DevOps Agent's IAM role to the cluster's `aws-auth` ConfigMap:
-```bash
-kubectl edit configmap aws-auth -n kube-system
-```
+Optionally compare against the CloudWatch-only baseline in the README ("Key Findings (CloudWatch-only baseline, before Grafana was attached)").
 
-Add:
-```yaml
-mapRoles:
-  - rolearn: arn:aws:iam::ACCOUNT_ID:role/DevOpsAgentRole
-    username: devops-agent
-    groups:
-      - system:masters
-```
+Talking point: in the CloudWatch-only baseline the agent did not detect node isolation, because `SchedulingDisabled` is Kubernetes object state rather than a CloudWatch metric. The Grafana source exports it as `kube_node_spec_unschedulable`. Whether the agent detects it via Grafana Cloud is an open question this demo answers.
 
 ---
 
-## Step 10 - Cleanup
+## Step 11 - Cleanup
 
-**9.1 Restore cluster:**
 ```bash
-bash scripts/cleanup.sh
+bash scripts/cleanup.sh              # after Scenario A
+bash scripts/cleanup-oom.sh          # after Scenario B
 ```
 
-**9.2 Scale nodes to zero (stop EC2 costs):**
-```bash
-aws eks update-nodegroup-config --region eu-central-1 \
-  --cluster-name eks-istanbul \
-  --nodegroup-name ng-istanbul-stress \
-  --scaling-config minSize=0,maxSize=2,desiredSize=0
+Between demos, save cost:
 
-aws eks update-nodegroup-config --region eu-central-1 \
-  --cluster-name eks-istanbul \
-  --nodegroup-name ng-istanbul-isolate \
-  --scaling-config minSize=0,maxSize=2,desiredSize=0
+```bash
+# Scale worker nodes to zero (prints the two commands to run)
+terraform -chdir=terraform output -raw scale_to_zero
+
+# Stop the Monitoring_Instance (Prometheus starts again automatically on start)
+aws ec2 stop-instances --region eu-central-1 --instance-ids \
+  $(aws ec2 describe-instances --region eu-central-1 \
+      --filters Name=tag:Name,Values=eks-istanbul-monitoring Name=instance-state-name,Values=running \
+      --query 'Reservations[].Instances[].InstanceId' --output text)
 ```
 
-**9.3 Destroy all infrastructure (when done):**
+After a stop/start the public IP changes; re-run `terraform refresh` (or `terraform apply`) before using `terraform output monitoring_public_ip`.
+
+Full teardown:
+
 ```bash
-cd terraform
-terraform destroy
-# Type "yes" when prompted
+bash scripts/cleanup-monitoring.sh
+cd terraform && terraform destroy
 ```
+
+Then, manually: detach the Grafana capability provider from the DevOps Agent Space (us-east-1), remove the provider registration, and revoke the Grafana service account token. Delete the Agent Space itself only if you no longer need it.
 
 ---
 
 ## Troubleshooting
 
-**terraform apply fails with subnet error:**
-→ Istanbul Local Zone not enabled. Go back to Step 1.
+**terraform apply fails with a subnet error**
+→ The Istanbul Local Zone is not enabled (Step 2).
 
-**kubectl get nodes shows no resources:**
+**terraform apply fails with `InvalidKeyPair.NotFound`**
+→ `ssh_key_name` must reference an existing key pair in eu-central-1.
+
+**kubectl shows no resources**
 ```bash
 aws eks update-kubeconfig --region eu-central-1 --name eks-istanbul
 ```
 
-**Container Insights pods not starting:**
-→ CloudWatchAgentServerPolicy may be missing from node role. Verify:
+**Container Insights pods not starting**
 ```bash
 aws iam list-attached-role-policies --role-name eks-istanbul-node-role
-```
-If missing:
-```bash
-aws iam attach-role-policy \
-  --role-name eks-istanbul-node-role \
-  --policy-arn arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+# CloudWatchAgentServerPolicy must be attached
 ```
 
-**CloudWatch alarm stays in OK after disaster:**
-→ Wait 2-3 minutes, metrics have a delay.
-→ Check stress pods are running: `kubectl get pods -o wide`
+**CloudWatch alarm stays OK after the disaster**
+→ Wait 2-3 minutes; check `kubectl get pods -o wide`.
 
-**DevOps Agent cannot find cluster:**
-→ Verify Agent Space data source is set to eu-central-1 region.
-→ Verify IAM permissions allow cross-region EKS DescribeCluster.
+**No data in Grafana panels**
+1. Targets: through the SSH tunnel, open `http://127.0.0.1:9090/targets`. Expect 3 targets `up`.
+2. If SSH fails: your public IP probably changed. Update `my_ip` in `terraform.tfvars` and run `terraform apply`.
+3. If targets are down: check `kubectl -n monitoring get pods -o wide`, and that the cluster security group rules for 9100/30808 from the monitoring security group exist (`terraform plan` shows no drift).
+4. If targets are up but Grafana is empty: on the instance, `sudo journalctl -u prometheus -n 50` for remote_write errors (401 = wrong username/token; re-export the variables and re-run `provision-monitoring-instance.sh`).
+5. Dashboard data source: re-import the JSON and pick the Grafana Cloud Prometheus data source; set the time range to the last 1 hour.
+6. The Monitoring_Instance may be stopped; start it and wait ~1 minute.
+
+**DevOps Agent cannot find the cluster**
+→ The Agent Space itself is in us-east-1, but its cloud source must point to region eu-central-1. Verify that, and that IAM allows `eks:DescribeCluster`.
 
 ---
 
 ## Key Talking Points
 
-- **Istanbul Local Zone**: Real edge computing scenario — AWS LBs don't support Local Zones
-- **Multi-layer investigation**: Kubernetes + EC2 + CloudWatch + VPC ENI all correlated by agent
-- **Speed**: Agent completed in ~7 min what would take an engineer 1-2 hours
-- **Limitations**: Shows where human oversight is still needed (kubectl access, audit logs)
-- **Production gap**: Enable EKS audit logs for full RCA:
+- **Istanbul Local Zone**: a real edge scenario; AWS load balancers do not support Local Zones.
+- **Out-of-cluster observer**: the Monitoring_Instance survives the incident and records `up=0`. Measured latency to the Local Zone is ~42 ms RTT with scrapes of 0.05-0.27 s.
+- **One Agent Space, two sources, one incident**: attribute each finding to CloudWatch/EKS or Grafana Cloud.
+- **Cost-aware telemetry**: only 8 metric families leave the account, far below the free-tier series cap.
+- **Production gap**: enable EKS control plane logs for full RCA:
+
 ```bash
-aws eks update-cluster-config \
-  --region eu-central-1 \
-  --name eks-istanbul \
+aws eks update-cluster-config --region eu-central-1 --name eks-istanbul \
   --logging '{"clusterLogging":[{"types":["api","audit","authenticator","controllerManager","scheduler"],"enabled":true}]}'
 ```

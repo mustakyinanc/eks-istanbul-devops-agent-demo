@@ -1,8 +1,25 @@
-# Copy this file to terraform.tfvars and fill in your values
-# cp terraform.tfvars.example terraform.tfvars
+# Copy this file to terraform.tfvars (gitignored) and fill in your values:
+#   cp terraform.tfvars.example terraform.tfvars
+#
+# No secrets belong in this file. Grafana Cloud credentials are passed to
+# scripts/provision-monitoring-instance.sh through environment variables only.
 
 region             = "eu-central-1"
 cluster_name       = "eks-istanbul"
 kubernetes_version = "1.33"
 instance_type      = "c7i.large"
-my_ip              = "YOUR_PUBLIC_IP/32"   # e.g. "1.2.3.4/32"
+
+# Your public IP as a /32 (curl ifconfig.me). Used for SSH to the monitoring
+# instance and NodePort/HTTP access to the workers. Never use 0.0.0.0/0.
+my_ip = "x.x.x.x/32"
+
+# --- Monitoring instance (out-of-cluster Prometheus host) ---
+monitoring_instance_type   = "c7i.large" # compute optimized, offered in eu-central-1c
+monitoring_disk_size       = 30          # GiB, gp3 root volume
+monitoring_local_retention = "24h"       # local TSDB only; long-term data lives in Grafana Cloud
+
+# Name of an EXISTING EC2 key pair in eu-central-1 (Terraform does not create it).
+# The private key is expected at ~/.ssh/<ssh_key_name>.pem with mode 600.
+# Naming it "eks-istanbul-monitoring" matches the default SSH_KEY path used by
+# scripts/provision-monitoring-instance.sh.
+ssh_key_name = "eks-istanbul-monitoring"

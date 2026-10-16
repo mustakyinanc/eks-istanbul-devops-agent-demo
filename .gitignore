@@ -9,6 +9,14 @@
 tfplan
 plan.out
 
+# Stray lock file from running `terraform init` at the repo root. The real one
+# lives in terraform/.terraform.lock.hcl and stays tracked.
+/.terraform.lock.hcl
+
+# Python
+__pycache__/
+*.pyc
+
 # Terraform variable files (contain operator IP, account-specific values)
 *.tfvars
 *.tfvars.json
@@ -25,3 +33,21 @@ crash.*.log
 
 # OS
 .DS_Store
+
+# Grafana credentials (admin password, DevOps Agent service account token)
+k8s/monitoring/grafana-admin-secret.yaml
+k8s/monitoring/*-secret.yaml
+!k8s/monitoring/*-secret.yaml.example
+
+# Private key and certificate material
+*.key
+*.pem
+*.crt
+
+# Local Python virtualenv and test caches
+.venv/
+.pytest_cache/
+.hypothesis/
+
+# Local-only helper scripts
+.kiro/specs/grafana-prometheus-observability/retire_req.py

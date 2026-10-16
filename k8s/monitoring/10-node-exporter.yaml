@@ -1,0 +1,173 @@
+# node-exporter DaemonSet — node-level CPU and memory metrics for BOTH workers.
+#
+# Applied by scripts/setup-monitoring.sh with plain kubectl — Helm is NOT a
+# prerequisite of this demo and must never become one.
+#
+# WHY THERE IS NO role-BASED nodeSelector
+# ---------------------------------------
+# Deliberately absent. k8s/stress-pod.yaml pins itself to `role: stress` and
+# kube-state-metrics pins itself to `role: isolate`, but node-exporter must run
+# on EVERY worker node — a DaemonSet with no nodeSelector gives exactly 1 pod
+# per node, 2 pods in this cluster. The Stress_Node is the target of every
+# injected disaster (CPU saturation, OOM), so its metrics are precisely the
+# data an investigation needs. Excluding it would leave the demo blind on the
+# only node that actually breaks. The tolerations below exist for the same
+# reason: the pod schedules regardless of any taint a worker carries, so a
+# tainted Stress_Node cannot silently drop out of coverage.
+#
+# WHY hostPort RATHER THAN A Service
+# ----------------------------------
+# Prometheus does NOT run in this cluster. It runs on a separate EC2 instance
+# in Frankfurt (eu-central-1c, 10.20.2.0/24), outside the cluster and outside
+# the Istanbul Local Zone, and it discovers targets with `ec2_sd_configs` on
+# `tag:eks:cluster-name = eks-istanbul`, then scrapes each worker's private IP
+# (10.20.10.x) on port 9100 over the VPC. `hostPort: 9100` is what makes the
+# node's own private address serve /metrics, which is the natural shape for a
+# per-node exporter: one pod per node, addressed by that node's IP. A ClusterIP
+# Service would load-balance across both pods and destroy the per-node identity
+# the per-node CPU/memory dashboard panels depend on; a
+# NodePort Service would add an indirection that buys nothing here.
+#
+# WHAT KEEPS PORT 9100 PRIVATE — THE SECURITY GROUP, NOT THIS MANIFEST
+# --------------------------------------------------------------------
+# node-exporter serves unauthenticated plaintext metrics, so reachability is
+# the entire control. This manifest cannot restrict reachability: a hostPort
+# binds on the node, and a Kubernetes manifest has no say over who may dial it.
+# The boundary lives in Terraform (task 3.2): a cluster security group ingress
+# rule allowing TCP 9100 with the Monitoring_Security_Group as its SOURCE — a
+# named source security group, never `0.0.0.0/0` and never `::/0`. That rule is
+# a hard prerequisite, not an optimization. Without it the port is unreachable
+# and Prometheus records up=0; with a `0.0.0.0/0` source it would publish node
+# metrics to the internet. No Service and no Ingress object is defined here, so
+# nothing in this file is internet-reachable on its own.
+#
+# METRICS THIS MUST EMIT
+# ----------------------
+# node_cpu_seconds_total, node_memory_MemAvailable_bytes,
+# node_memory_MemTotal_bytes and node_load1. These back the CPU and memory
+# dashboard panels, and are all on the
+# Metric_Allowlist that remote_write forwards to Grafana Cloud. Reading them
+# requires the host's /proc, /sys and / mounted read-only plus hostPID, which
+# is why those appear below.
+#
+# The image tag is pinned to an immutable release. Never `latest`: a floating
+# tag would let a node restart silently change the exporter mid-demo and the
+# metric names the panels and alerts are written against.
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node-exporter
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: node-exporter
+    demo: eks-istanbul-devops-agent
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: node-exporter
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: node-exporter
+        demo: eks-istanbul-devops-agent
+    spec:
+      # Run on every node, whatever taints it carries. Paired with the absent
+      # nodeSelector this is what guarantees the Stress_Node stays covered.
+      tolerations:
+        - operator: Exists
+      # hostPID lets the exporter resolve host processes behind /proc entries.
+      hostPID: true
+      # No ServiceAccount token is needed: node-exporter reads the host
+      # filesystem, never the Kubernetes API.
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: node-exporter
+          image: quay.io/prometheus/node-exporter:v1.8.2
+          imagePullPolicy: IfNotPresent
+          args:
+            - --path.procfs=/host/proc
+            - --path.sysfs=/host/sys
+            - --path.rootfs=/host/root
+            # Bind on all interfaces inside the pod so the node's hostPort
+            # mapping can reach the listener at all. Reachability is governed
+            # by the security group rule described in the header, not here.
+            - --web.listen-address=:9100
+            # Collectors kept to what the demo actually queries plus the
+            # defaults; mount-point noise from container runtimes is dropped.
+            - --collector.filesystem.mount-points-exclude=^/(dev|proc|sys|var/lib/docker/.+|var/lib/kubelet/.+)($|/)
+            - --collector.filesystem.fs-types-exclude=^(autofs|binfmt_misc|cgroup2?|configfs|debugfs|devpts|devtmpfs|fusectl|hugetlbfs|mqueue|nsfs|overlay|proc|procfs|pstore|securityfs|selinuxfs|squashfs|sysfs|tracefs)$
+          ports:
+            # hostPort 9100 is the deliberate exposure mechanism: it is how
+            # out-of-cluster Prometheus reaches this node. See the header.
+            - name: metrics
+              containerPort: 9100
+              hostPort: 9100
+              protocol: TCP
+          # Node allocatable is 1930m CPU / 3215884Ki memory per node, so these
+          # values are deliberately small — the exporter must never compete for
+          # the resources the injected disasters are meant to consume.
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+          securityContext:
+            # Unprivileged: the host paths below are mounted read-only, so no
+            # root and no extra capabilities are required to read them.
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            privileged: false
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: proc
+              mountPath: /host/proc
+              readOnly: true
+            - name: sys
+              mountPath: /host/sys
+              readOnly: true
+            - name: root
+              mountPath: /host/root
+              mountPropagation: HostToContainer
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /
+              port: metrics
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+      volumes:
+        # All three host mounts are read-only. node-exporter only reads node
+        # state; it must never be able to write to the host it observes.
+        - name: proc
+          hostPath:
+            path: /proc
+            type: Directory
+        - name: sys
+          hostPath:
+            path: /sys
+            type: Directory
+        - name: root
+          hostPath:
+            path: /
+            type: Directory

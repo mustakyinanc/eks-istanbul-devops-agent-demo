@@ -1,0 +1,117 @@
+# Namespace and RBAC for the in-cluster metric exporters.
+#
+# Applied by scripts/setup-monitoring.sh with plain kubectl — Helm is NOT a
+# prerequisite of this demo and must never become one.
+#
+# READ-ONLY RBAC POSTURE
+# ----------------------
+# The ClusterRole below grants only `get`, `list` and `watch`. It deliberately
+# contains none of `create`, `update`, `patch`, `delete` or `deletecollection`.
+# kube-state-metrics only ever reads Kubernetes object state and turns it into
+# metrics, so write verbs would be unused privilege. Keeping the role read-only
+# also means the observability layer can never mutate the very cluster whose
+# failures it is there to record.
+#
+# WHY THERE IS NO PROMETHEUS SERVICEACCOUNT HERE
+# ----------------------------------------------
+# Prometheus does NOT run inside this cluster. It runs on a separate EC2
+# instance in Frankfurt (eu-central-1c), outside the cluster and outside the
+# Istanbul Local Zone, and it discovers its scrape targets with
+# `ec2_sd_configs` filtered on `tag:eks:cluster-name = eks-istanbul`. That
+# discovery path authenticates against the EC2 API with the instance IAM role,
+# not against the Kubernetes API, so Prometheus needs no ServiceAccount, no
+# ClusterRole and no bearer token in this cluster. See the "Target Discovery -
+# Decision and Rationale" section of the design: requirement 3.7 asked for a
+# Prometheus ServiceAccount, and the design made it unnecessary.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+  labels:
+    name: monitoring
+    demo: eks-istanbul-devops-agent
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kube-state-metrics
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: kube-state-metrics
+    demo: eks-istanbul-devops-agent
+automountServiceAccountToken: true
+---
+# Cluster-scoped read access. kube-state-metrics watches objects across all
+# namespaces, which is why this is a ClusterRole rather than a Role.
+#
+# Every rule is limited to get/list/watch. Two of the resources listed here
+# carry the demo's key signals:
+#   * nodes      -> kube_node_spec_unschedulable, the SchedulingDisabled signal
+#                   that the CloudWatch-only baseline investigation missed
+#   * pods       -> kube_pod_container_status_restarts_total, the OOMKilled
+#                   restart signal behind the restarts panel
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kube-state-metrics
+  labels:
+    app.kubernetes.io/name: kube-state-metrics
+    demo: eks-istanbul-devops-agent
+rules:
+  # Core API group. `nodes` backs kube_node_spec_unschedulable and `pods` backs
+  # kube_pod_container_status_restarts_total / kube_pod_status_phase.
+  - apiGroups:
+      - ""
+    resources:
+      - nodes
+      - pods
+      - services
+      - endpoints
+      - namespaces
+      - replicationcontrollers
+      - persistentvolumes
+      - persistentvolumeclaims
+      - resourcequotas
+    verbs:
+      - get
+      - list
+      - watch
+  # Workload controllers.
+  - apiGroups:
+      - apps
+    resources:
+      - deployments
+      - daemonsets
+      - replicasets
+      - statefulsets
+    verbs:
+      - get
+      - list
+      - watch
+  # Batch workloads.
+  - apiGroups:
+      - batch
+    resources:
+      - jobs
+      - cronjobs
+    verbs:
+      - get
+      - list
+      - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kube-state-metrics
+  labels:
+    app.kubernetes.io/name: kube-state-metrics
+    demo: eks-istanbul-devops-agent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kube-state-metrics
+subjects:
+  - kind: ServiceAccount
+    name: kube-state-metrics
+    namespace: monitoring

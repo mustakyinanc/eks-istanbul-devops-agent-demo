@@ -1,0 +1,215 @@
+# kube-state-metrics — Kubernetes object state as metrics.
+#
+# Applied by scripts/setup-monitoring.sh with plain kubectl — Helm is NOT a
+# prerequisite of this demo and must never become one.
+#
+# The ServiceAccount, ClusterRole and ClusterRoleBinding this pod runs under are
+# defined once in 00-namespace-rbac.yaml and are deliberately NOT repeated here.
+# That role grants only get/list/watch, so this component can read the state of
+# the cluster it observes but can never mutate it.
+#
+# WHY role=isolate, AND WHY CORDONING DOES NOT BREAK IT
+# -----------------------------------------------------
+# A single replica is enough: kube-state-metrics holds a snapshot of cluster
+# state in memory and every metric it emits is cluster-scoped, so a second
+# replica would duplicate every series without adding a signal. It is pinned to
+# the Isolate_Node because the Stress_Node is deliberately saturated by the
+# disaster scenarios (CPU saturation, then OOM) and a collector competing for
+# those resources would lose data at exactly the moment the data matters.
+#
+# scripts/disaster.sh cordons the isolate node, which sounds like a conflict but
+# is not: cordoning only sets `spec.unschedulable` so the scheduler places no
+# NEW pods there. It does not evict pods that are already running — that is what
+# `kubectl drain` does, and the demo never drains. So this pod keeps running
+# through the cordon and keeps reporting the very metric that records it.
+#
+# WHY NodePort 30808 RATHER THAN ClusterIP
+# ----------------------------------------
+# Prometheus does NOT run in this cluster. It runs on a separate EC2 instance in
+# Frankfurt (eu-central-1c, 10.20.2.0/24), outside the cluster and outside the
+# Istanbul Local Zone, and it discovers targets with `ec2_sd_configs` on
+# `tag:eks:cluster-name = eks-istanbul`, then scrapes a worker's private IP
+# (10.20.10.x) on port 30808 over the VPC. A ClusterIP is unreachable from
+# outside the cluster, so it would leave the out-of-cluster collector blind.
+# NodePort is what puts this single-replica Deployment on an address Prometheus
+# can actually dial. Node-level metrics take the other shape for the same
+# reason — see the hostPort rationale in 10-node-exporter.yaml.
+#
+# WHAT KEEPS PORT 30808 PRIVATE — THE SECURITY GROUP, NOT THIS MANIFEST
+# ---------------------------------------------------------------------
+# kube-state-metrics serves unauthenticated plaintext metrics describing every
+# object in the cluster, so reachability is the entire control. This manifest
+# cannot restrict reachability: a NodePort opens the port on every node, and a
+# Kubernetes manifest has no say over who may dial it. The boundary lives in
+# Terraform (task 3.2): a cluster security group ingress rule allowing TCP 30808
+# with the Monitoring_Security_Group as its SOURCE — a named source security
+# group, never `0.0.0.0/0` and never `::/0`. That rule is a HARD PREREQUISITE,
+# not an optimization. Without it the port is unreachable and Prometheus records
+# up=0; with a `0.0.0.0/0` source it would publish cluster object state to the
+# internet.
+#
+# The NodePort range is not open to the internet today: the existing cluster
+# security group rule covering 30000-32767 is scoped to `var.my_ip` (/32) only,
+# and task 3.2 does not widen it. No Ingress object is defined here.
+#
+# METRICS THIS MUST EMIT
+# ----------------------
+#   * kube_node_spec_unschedulable            — the SchedulingDisabled signal
+#       that the CloudWatch-only baseline investigation missed. Whether the
+#       DevOps Agent Space detects it via the Grafana Cloud source is the OPEN
+#       QUESTION this demo answers; it is recorded in the Comparison_Table,
+#       not asserted in advance.
+#   * kube_pod_container_status_restarts_total — the OOMKilled restart signal
+#       behind the container restarts panel.
+#   * kube_pod_status_phase                    — investigation context.
+# All three are on the Metric_Allowlist that remote_write forwards to Grafana
+# Cloud. `kube_node_spec_unschedulable` is a STABLE metric of the node family in
+# the pinned version, so emission is a property of the release rather than of
+# configuration — the default resource set below includes `nodes` and `pods`.
+# Live emission is verified when the manifests are actually applied (task 6).
+#
+# Resource collection is left at the component default rather than narrowed with
+# `--resources`. Cardinality is handled where the design puts it: the allowlist
+# on the remote_write path. Narrowing here would also shrink what the local TSDB
+# holds for detailed investigation, which is the opposite of what we want.
+#
+# The image tag is pinned to an immutable release. Never `latest`: a floating
+# tag would let a pod restart silently change the exporter mid-demo and the
+# metric names the panels and alerts are written against. v2.17.0 is the release
+# whose client-go targets Kubernetes 1.33, the version this cluster runs.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kube-state-metrics
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: kube-state-metrics
+    demo: eks-istanbul-devops-agent
+spec:
+  # One replica. Every series is cluster-scoped, so a second replica would only
+  # duplicate it. See the header for why that is the right call here.
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kube-state-metrics
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kube-state-metrics
+        demo: eks-istanbul-devops-agent
+    spec:
+      # Keep the collector off the node the disasters deliberately saturate.
+      # disaster.sh cordons this node, which does not evict a running pod.
+      nodeSelector:
+        role: isolate
+      # Read-only ServiceAccount from 00-namespace-rbac.yaml. Unlike
+      # node-exporter, this component DOES need its token: every metric it emits
+      # comes from watching the Kubernetes API.
+      serviceAccountName: kube-state-metrics
+      automountServiceAccountToken: true
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: kube-state-metrics
+          image: registry.k8s.io/kube-state-metrics/kube-state-metrics:v2.17.0
+          imagePullPolicy: IfNotPresent
+          args:
+            # Metrics (exposition) port — what the NodePort Service publishes
+            # and what Prometheus scrapes. Reachability is governed by the
+            # security group rule described in the header, not here.
+            - --port=8080
+            # Telemetry port — kube-state-metrics' own process metrics and the
+            # /readyz endpoint. Not published by any Service; the kubelet
+            # reaches it directly for the readiness probe.
+            - --telemetry-port=8081
+          ports:
+            - name: metrics
+              containerPort: 8080
+              protocol: TCP
+            - name: telemetry
+              containerPort: 8081
+              protocol: TCP
+          # Node allocatable is 1930m CPU / 3215884Ki memory per node. With
+          # Prometheus moved out of the cluster, the whole in-cluster footprint
+          # on the isolate node is 100m CPU / 192Mi memory in requests
+          # (node-exporter 50m/64Mi + this 50m/128Mi) — under 6 percent of the
+          # node, comfortably inside the 40 percent budget. The CPU limit is set
+          # above the request because a throttled kube-state-metrics backs up
+          # its internal queues and grows its memory instead.
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          securityContext:
+            # Same posture as 10-node-exporter.yaml. This component only reads
+            # the Kubernetes API over the network, so it needs no host access,
+            # no root and no capabilities whatsoever.
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            privileged: false
+            capabilities:
+              drop:
+                - ALL
+          # /healthz is served on the metrics port and answers once the process
+          # is up. /readyz is served on the telemetry port and answers only once
+          # the initial API watches have populated, so it is the one that gates
+          # traffic: a pod that is Ready has state to report, not an empty
+          # snapshot. setup-monitoring.sh waits on exactly this condition.
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 20
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            periodSeconds: 30
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: telemetry
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+---
+# NodePort Service — the exposure mechanism for out-of-cluster Prometheus.
+#
+# nodePort 30808 is fixed, not assigned dynamically, because Prometheus is
+# configured with that port as a literal in its ec2_sd_configs job and the
+# security group rule in task 3.2 opens that exact port. A dynamic port would
+# break both. Node identity still comes from EC2 discovery and relabeling, so no
+# node name or private IP is written anywhere in this file.
+apiVersion: v1
+kind: Service
+metadata:
+  name: kube-state-metrics
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: kube-state-metrics
+    demo: eks-istanbul-devops-agent
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: kube-state-metrics
+  ports:
+    - name: metrics
+      port: 8080
+      targetPort: metrics
+      nodePort: 30808
+      protocol: TCP
